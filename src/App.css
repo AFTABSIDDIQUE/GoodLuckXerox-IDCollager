@@ -539,7 +539,12 @@ button {
   cursor: pointer;
 }
 
-/* --- Toggle switch (used for "Add border") --- */
+/* --- Toggle switch (used for "Add border", "Rounded
+   corners", "Black & white", etc.) ---
+
+   The knob is forced to a true circle via aspect-ratio
+   (not just width/height) so it can never render as an
+   oval, regardless of what container it sits in. */
 
 .toggle-row {
   display: flex;
@@ -597,6 +602,9 @@ button {
   left: 3px;
   width: 20px;
   height: 20px;
+  aspect-ratio: 1 / 1;
+  box-sizing: border-box;
+  flex-shrink: 0;
   border-radius: 50%;
   background: #fff;
   box-shadow: 0 1px 3px rgba(33, 31, 28, 0.35);
@@ -608,8 +616,8 @@ button {
 }
 
 /* --- Border thickness slider ---
-   Border is fixed to black (no color picker); this is the
-   only border control besides the on/off switch above. */
+   Border is fixed to black (no color picker); thickness
+   and corner-radius sliders share this same styling. */
 
 .border-thickness-panel {
   background: var(--paper-deep);
@@ -1543,4 +1551,205 @@ button {
 .inline-crop-actions .apply:hover {
   background: var(--red-deep);
   transform: translateY(-1px);
+}
+
+/*
+=========================================================
+ADD THESE RULES TO App.css
+(alongside your existing .thumb / .thumb-remove rules)
+
+They style the new drag-and-drop + ‹ › move-button
+reordering added to the "Your Photos" thumbnail grid.
+=========================================================
+*/
+
+.thumb {
+  cursor: grab;
+  position: relative;
+  transition: transform 0.15s ease, box-shadow 0.15s ease;
+}
+
+.thumb:active {
+  cursor: grabbing;
+}
+
+.thumb.dragging {
+  opacity: 0.4;
+}
+
+.thumb.drag-over {
+  box-shadow: 0 0 0 3px #000 inset;
+  transform: scale(0.97);
+}
+
+.thumb-reorder {
+  position: absolute;
+  bottom: 6px;
+  left: 50%;
+  transform: translateX(-50%);
+  display: flex;
+  gap: 4px;
+  opacity: 0;
+  transition: opacity 0.15s ease;
+}
+
+.thumb:hover .thumb-reorder,
+.thumb:focus-within .thumb-reorder {
+  opacity: 1;
+}
+
+.thumb-move-btn {
+  width: 24px;
+  height: 24px;
+  border-radius: 50%;
+  border: none;
+  background: rgba(0, 0, 0, 0.75);
+  color: #fff;
+  font-size: 15px;
+  line-height: 1;
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.thumb-move-btn:hover:not(:disabled) {
+  background: rgba(0, 0, 0, 0.9);
+}
+
+.thumb-move-btn:disabled {
+  opacity: 0.3;
+  cursor: not-allowed;
+}
+
+/*
+=========================================================
+FREE-FORM (POLYGON) CROP — mode toggle, click-to-trace
+canvas overlay, undo/clear buttons, and a hover TOOLTIP
+in the edit frame.
+
+Previously the tracing cursor was a custom SVG (a small
+green rectangle outline) shown at the mouse position via
+`cursor: url(...)`. That's gone now — plain `crosshair` is
+used instead — and in its place is an actual tooltip bubble
+that appears above the image on hover, driven by the
+`data-tooltip` attribute set in the JSX.
+=========================================================
+*/
+
+.crop-mode-toggle {
+  display: flex;
+  gap: 8px;
+  margin-bottom: 10px;
+}
+
+.crop-mode-toggle button {
+  flex: 1;
+  padding: 8px 10px;
+  border-radius: 8px;
+  border: 1px solid rgba(0, 0, 0, 0.15);
+  background: #fff;
+  cursor: pointer;
+  font-size: 13px;
+  font-weight: 500;
+}
+
+.crop-mode-toggle button.active {
+  background: #000;
+  color: #fff;
+  border-color: #000;
+}
+
+.free-crop-container {
+  position: relative;
+  display: inline-block;
+  line-height: 0;
+  cursor: crosshair;
+  max-width: 100%;
+}
+
+/* Tooltip bubble — shown above the image on hover, text
+   comes from the data-tooltip attribute set in the JSX so
+   it can change with crop progress ("click to trace...",
+   "click the start point to close...", etc). */
+
+.free-crop-container::after {
+  content: attr(data-tooltip);
+  position: absolute;
+  left: 50%;
+  bottom: 100%;
+  transform: translate(-50%, -10px);
+  max-width: 260px;
+  width: max-content;
+  padding: 7px 11px;
+  border-radius: 7px;
+  background: var(--ink);
+  color: var(--paper);
+  font-family: var(--font-mono);
+  font-size: 11.5px;
+  line-height: 1.4;
+  text-align: center;
+  white-space: normal;
+  opacity: 0;
+  pointer-events: none;
+  transition: opacity 0.15s ease, transform 0.15s ease;
+  z-index: 6;
+}
+
+/* Small downward-pointing triangle under the bubble */
+
+.free-crop-container::before {
+  content: "";
+  position: absolute;
+  left: 50%;
+  bottom: 100%;
+  transform: translate(-50%, 0px);
+  border: 5px solid transparent;
+  border-top-color: var(--ink);
+  margin-bottom: -10px;
+  opacity: 0;
+  pointer-events: none;
+  transition: opacity 0.15s ease;
+  z-index: 6;
+}
+
+.free-crop-container:hover::after {
+  opacity: 1;
+  transform: translate(-50%, -14px);
+}
+
+.free-crop-container:hover::before {
+  opacity: 1;
+}
+
+.free-crop-overlay {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  pointer-events: none;
+}
+
+.free-crop-actions {
+  display: flex;
+  gap: 8px;
+  margin-top: 8px;
+}
+
+.free-crop-actions button {
+  padding: 6px 12px;
+  border-radius: 8px;
+  border: 1px solid rgba(0, 0, 0, 0.15);
+  background: #fff;
+  cursor: pointer;
+  font-size: 13px;
+}
+
+.free-crop-actions button:hover:not(:disabled) {
+  background: #f3f3f3;
+}
+
+.free-crop-actions button:disabled {
+  opacity: 0.4;
+  cursor: not-allowed;
 }

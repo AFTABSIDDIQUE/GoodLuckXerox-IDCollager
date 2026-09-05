@@ -30,6 +30,41 @@ const BORDER_STEP_MM = 0.5;
 
 /*
 =========================================================
+PDF FILE SIZE
+
+Each A4 page used to be embedded as a PNG — lossless, and
+several MB per page at 300 DPI. Switching the final page
+render (and the PDF embed) to JPEG cuts that down hugely
+for photographic content, at a quality level high enough
+that the difference isn't visible in print. Lower this
+value for smaller files, raise it (closer to 1) for higher
+fidelity/bigger files.
+=========================================================
+*/
+
+const PDF_IMAGE_QUALITY = 0.82;
+
+/*
+=========================================================
+FREE-FORM (POLYGON) CROP CONSTANTS
+=========================================================
+*/
+
+// Minimum points needed before the shape can be closed.
+const POLYGON_MIN_POINTS = 3;
+
+// Exact point count required to offer the "stretch to
+// rectangle" perspective warp — a homography needs exactly
+// 4 correspondences (the 4 corners of the tilted subject)
+// to map onto the 4 corners of a straight rectangle.
+const POLYGON_STRETCH_POINT_COUNT = 4;
+
+// Clicking within this % distance (of the image's own
+// width/height) of the starting point closes the shape.
+const POLYGON_CLOSE_THRESHOLD_PCT = 4;
+
+/*
+=========================================================
 LAYOUTS
 =========================================================
 */
@@ -74,6 +109,17 @@ const baseLayouts = {
     rows: 3,
     gapMm: 5,
     marginMm: 10,
+  },
+
+  tenByFifteen: {
+    name: "13×18 Photo",
+    tag: "130×180mm · 2 per page",
+    mode: "fixed",
+    photoWidthMm: 130,
+    photoHeightMm: 180,
+    columns: 2,
+    rows: 1,
+    gapMm: 10,
   },
 };
 
@@ -288,6 +334,18 @@ function App() {
 
   /*
   -------------------------------------------------------
+  THUMBNAIL REORDERING (drag-and-drop + move buttons)
+  -------------------------------------------------------
+  */
+
+  const [draggedIndex, setDraggedIndex] =
+    useState(null);
+
+  const [dragOverIndex, setDragOverIndex] =
+    useState(null);
+
+  /*
+  -------------------------------------------------------
   SELECTED IMAGE
   -------------------------------------------------------
   */
@@ -309,6 +367,113 @@ function App() {
 
   /*
   -------------------------------------------------------
+  FREE-FORM (POLYGON) CROP
+
+  An alternative to the rectangle ReactCrop above. The user
+  clicks points around the image to trace any shape; clicking
+  back near the first point closes it. `cropMode` decides
+  which of the two crop tools is active in the editor.
+  -------------------------------------------------------
+  */
+
+  const [cropMode, setCropMode] =
+    useState("rectangle"); // "rectangle" | "freeform"
+
+  const [polygonPoints, setPolygonPoints] =
+    useState([]); // [{ xPct, yPct }, ...]
+
+  const [isPolygonClosed, setIsPolygonClosed] =
+    useState(false);
+
+  /*
+  -------------------------------------------------------
+  FREE-FORM CROP — STRETCH TO RECTANGLE
+
+  When the traced shape has exactly 4 points, the user can
+  opt into a perspective ("stretch") warp instead of a plain
+  polygon clip. Rather than cutting out the quad and padding
+  the rest with white, this maps the 4 clicked corners onto
+  a straight rectangle and resamples the image into it — so
+  a document or photo shot at an angle gets straightened and
+  stretched to fill the frame edge-to-edge. Only meaningful
+  for a 4-point shape, so it's force-reset whenever the point
+  count isn't exactly 4 (see the effect below).
+  -------------------------------------------------------
+  */
+
+  const [stretchToRectangle, setStretchToRectangle] =
+    useState(false);
+
+  useEffect(() => {
+    if (
+      polygonPoints.length !==
+        POLYGON_STRETCH_POINT_COUNT &&
+      stretchToRectangle
+    ) {
+      setStretchToRectangle(false);
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [polygonPoints]);
+
+  const freeCropContainerRef = useRef(null);
+
+  /*
+  -------------------------------------------------------
+  FREE-FORM CROP — CONTAINER PIXEL SIZE
+
+  The SVG overlay used to use a fixed 0–100 viewBox with
+  preserveAspectRatio="none" stretched over a container
+  that usually ISN'T square (most photos are 4:3, 3:2,
+  portrait, etc). That non-uniform stretch scaled x and y
+  by different factors, so a <circle> — which only has one
+  radius for both axes — rendered as an oval.
+
+  Fix: track the container's actual rendered pixel size and
+  make the SVG's viewBox match those pixel dimensions
+  exactly. Then the SVG's internal scale factor is 1:1 on
+  both axes (no distortion), so circles stay circles no
+  matter the image's aspect ratio. `polygonPoints` still
+  stores percentages (so crop math elsewhere is untouched);
+  only the rendering below converts percent -> pixels.
+  -------------------------------------------------------
+  */
+
+  const [freeCropContainerSize, setFreeCropContainerSize] =
+    useState({ width: 0, height: 0 });
+
+  useEffect(() => {
+    const container = freeCropContainerRef.current;
+
+    if (!container) return;
+
+    const updateSize = () => {
+      const rect = container.getBoundingClientRect();
+
+      setFreeCropContainerSize({
+        width: rect.width,
+        height: rect.height,
+      });
+    };
+
+    updateSize();
+
+    const observer = new ResizeObserver(updateSize);
+
+    observer.observe(container);
+
+    return () => observer.disconnect();
+    // Runs once — the ResizeObserver itself keeps
+    // `freeCropContainerSize` in sync with the container's
+    // actual rendered size for as long as it exists in the
+    // DOM (including when the editor image swaps in/out or
+    // the window resizes). A second effect further below
+    // re-measures on crop-mode switches and image loads,
+    // which is when the container is freshly mounted.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  /*
+  -------------------------------------------------------
   EDITING
   -------------------------------------------------------
   */
@@ -324,6 +489,9 @@ function App() {
 
   const [zoom, setZoom] =
     useState(1);
+
+  const [grayscale, setGrayscale] =
+    useState(false);
 
   /*
   -------------------------------------------------------
@@ -356,7 +524,7 @@ function App() {
   -------------------------------------------------------
   BORDER
   Border is always black — only "on/off" and thickness
-  are user-controlled.
+  are user-controlled. Corners can also be rounded.
   -------------------------------------------------------
   */
 
@@ -366,7 +534,13 @@ function App() {
   const BORDER_COLOR = "#000000";
 
   const [borderWidthMm, setBorderWidthMm] =
-    useState(1);
+    useState(0.5);
+
+  const [borderRounded, setBorderRounded] =
+    useState(false);
+
+  const [borderRadiusMm, setBorderRadiusMm] =
+    useState(3);
 
   /*
   -------------------------------------------------------
@@ -549,6 +723,22 @@ function App() {
 
       cropRotation: null,
 
+      // Free-form (polygon) crop, saved as points relative
+      // to the image at `freeCropRotation`. Only one of the
+      // rectangle crop above or this is ever "active" for a
+      // photo — `cropType` says which.
+      freeCropPoints: null,
+
+      freeCropRotation: null,
+
+      // Whether the free-form crop above should be resolved
+      // as a perspective "stretch to rectangle" warp rather
+      // than a plain polygon clip. Only meaningful when
+      // `freeCropPoints` has exactly 4 points.
+      freeCropStretch: false,
+
+      cropType: null,
+
       rotation: 0,
 
       // Rotation applied from the A4 preview (frame rotate
@@ -565,6 +755,8 @@ function App() {
       contrast: 100,
 
       zoom: 1,
+
+      grayscale: false,
 
       // Frame-fitted preview, used for the thumbnail grid
       // and the editor's "Fitted Preview". Always sized to
@@ -598,6 +790,141 @@ function App() {
 
     addFiles(event.dataTransfer.files);
   };
+
+  /*
+  ========================================================
+  REORDER PHOTOS
+
+  Moves the photo at `fromIndex` to sit at `toIndex` within
+  the `images` array. Everything downstream — thumbnails,
+  the editor's `selectedIndex`, and the A4 preview — is
+  derived from this array's order, so a single splice here
+  is all that's needed to move a photo (and everything about
+  it: its crop, content, rotation, etc.) to a new position.
+  Works for both drag-and-drop and the ‹ › move buttons.
+  ========================================================
+  */
+
+  const moveImage = (fromIndex, toIndex) => {
+    if (
+      fromIndex === null ||
+      toIndex === null ||
+      fromIndex === toIndex ||
+      fromIndex < 0 ||
+      toIndex < 0 ||
+      fromIndex >= images.length ||
+      toIndex >= images.length
+    ) {
+      return;
+    }
+
+    setImages((previous) => {
+      const updated = [...previous];
+
+      const [moved] = updated.splice(
+        fromIndex,
+        1
+      );
+
+      updated.splice(
+        toIndex,
+        0,
+        moved
+      );
+
+      return updated;
+    });
+
+    // If the photo that moved is the one currently open in
+    // the editor, keep the editor pointed at it in its new
+    // position rather than whatever photo now occupies its
+    // old slot.
+    setSelectedIndex((previous) => {
+      if (previous === null) return previous;
+
+      if (previous === fromIndex) return toIndex;
+
+      if (
+        fromIndex < previous &&
+        toIndex >= previous
+      ) {
+        return previous - 1;
+      }
+
+      if (
+        fromIndex > previous &&
+        toIndex <= previous
+      ) {
+        return previous + 1;
+      }
+
+      return previous;
+    });
+
+    // Order changed — the A4 preview will regenerate via
+    // the existing `images`-watching effect, but clear the
+    // stale pages immediately so the UI doesn't show an
+    // out-of-date layout while that regenerates.
+    setA4Pages([]);
+  };
+
+  const handleThumbDragStart =
+    (index) => (event) => {
+      setDraggedIndex(index);
+      event.dataTransfer.effectAllowed = "move";
+    };
+
+  const handleThumbDragOver =
+    (index) => (event) => {
+      event.preventDefault();
+
+      event.dataTransfer.dropEffect = "move";
+
+      if (dragOverIndex !== index) {
+        setDragOverIndex(index);
+      }
+    };
+
+  const handleThumbDragLeave =
+    (index) => () => {
+      setDragOverIndex((previous) =>
+        previous === index ? null : previous
+      );
+    };
+
+  const handleThumbDrop =
+    (index) => (event) => {
+      event.preventDefault();
+
+      moveImage(draggedIndex, index);
+
+      setDraggedIndex(null);
+      setDragOverIndex(null);
+    };
+
+  const handleThumbDragEnd = () => {
+    setDraggedIndex(null);
+    setDragOverIndex(null);
+  };
+
+  /*
+  ========================================================
+  FILTER STRING HELPER
+
+  Central place that turns brightness/contrast/grayscale
+  into a CSS/canvas filter string, so every draw call and
+  every live CSS preview stays in sync.
+  ========================================================
+  */
+
+  const buildFilterString = (
+    imageBrightness = 100,
+    imageContrast = 100,
+    imageGrayscale = false
+  ) =>
+    `brightness(${imageBrightness}%) contrast(${imageContrast}%)${
+      imageGrayscale ? " grayscale(100%)" : ""
+    }`;
 
   /*
   ========================================================
@@ -681,6 +1008,43 @@ function App() {
 
   /*
   ========================================================
+  ROUNDED RECT PATH HELPER
+
+  Traces a rounded-rectangle path on the given context so it
+  can be used for both clipping (photo corners) and stroking
+  (border corners). Radius is clamped so it never exceeds
+  half the shortest side.
+  ========================================================
+  */
+
+  const drawRoundedRectPath = (
+    ctx,
+    x,
+    y,
+    width,
+    height,
+    radius
+  ) => {
+    const r = Math.max(
+      0,
+      Math.min(radius, width / 2, height / 2)
+    );
+
+    ctx.beginPath();
+    ctx.moveTo(x + r, y);
+    ctx.lineTo(x + width - r, y);
+    ctx.arcTo(x + width, y, x + width, y + r, r);
+    ctx.lineTo(x + width, y + height - r);
+    ctx.arcTo(x + width, y + height, x + width - r, y + height, r);
+    ctx.lineTo(x + r, y + height);
+    ctx.arcTo(x, y + height, x, y + height - r, r);
+    ctx.lineTo(x, y + r);
+    ctx.arcTo(x, y, x + r, y, r);
+    ctx.closePath();
+  };
+
+  /*
+  ========================================================
   FIT IMAGE — CONTAIN (never crops, never stretches, never
   zooms). Scales the whole source down (or up) so it fits
   entirely inside the target box, centered, with white
@@ -696,7 +1060,8 @@ function App() {
     targetWidth,
     targetHeight,
     imageBrightness = 100,
-    imageContrast = 100
+    imageContrast = 100,
+    imageGrayscale = false
   ) => {
     const canvas =
       document.createElement("canvas");
@@ -733,8 +1098,11 @@ function App() {
     const offsetY =
       (targetHeight - drawHeight) / 2;
 
-    ctx.filter =
-      `brightness(${imageBrightness}%) contrast(${imageContrast}%)`;
+    ctx.filter = buildFilterString(
+      imageBrightness,
+      imageContrast,
+      imageGrayscale
+    );
 
     ctx.drawImage(
       source,
@@ -773,7 +1141,8 @@ function App() {
     cropWidth,
     cropHeight,
     imageBrightness = 100,
-    imageContrast = 100
+    imageContrast = 100,
+    imageGrayscale = false
   ) => {
     const canvas =
       document.createElement("canvas");
@@ -791,8 +1160,11 @@ function App() {
     const ctx =
       canvas.getContext("2d");
 
-    ctx.filter =
-      `brightness(${imageBrightness}%) contrast(${imageContrast}%)`;
+    ctx.filter = buildFilterString(
+      imageBrightness,
+      imageContrast,
+      imageGrayscale
+    );
 
     ctx.drawImage(
       source,
@@ -811,6 +1183,429 @@ function App() {
     return canvas.toDataURL(
       "image/png"
     );
+  };
+
+  /*
+  ========================================================
+  CREATE POLYGON-CLIPPED CANVAS (free-form crop)
+
+  Takes the user's clicked points (percentages relative to
+  the displayed, rotated editor image) and clips the source
+  image to that shape. Returns a canvas sized to the
+  polygon's bounding box: the polygon area shows the image,
+  everything else in the box is filled white — matching the
+  white "letterbox" convention used everywhere else in this
+  app for content that doesn't fill its frame. This output
+  slots into the exact same pipeline as the rectangle crop's
+  `contentUrl` / `processedUrl`, so free-form crops get
+  frame-fitting, printing, and rotation for free.
+  ========================================================
+  */
+
+  const createPolygonClippedCanvas = (
+    source,
+    pointsPct,
+    imageBrightness = 100,
+    imageContrast = 100,
+    imageGrayscale = false
+  ) => {
+    const sourcePoints = pointsPct.map(
+      (point) => ({
+        x: (point.xPct / 100) * source.width,
+        y: (point.yPct / 100) * source.height,
+      })
+    );
+
+    const xs = sourcePoints.map((point) => point.x);
+    const ys = sourcePoints.map((point) => point.y);
+
+    const minX = Math.min(...xs);
+    const maxX = Math.max(...xs);
+    const minY = Math.min(...ys);
+    const maxY = Math.max(...ys);
+
+    const width = Math.max(
+      1,
+      Math.round(maxX - minX)
+    );
+
+    const height = Math.max(
+      1,
+      Math.round(maxY - minY)
+    );
+
+    const canvas =
+      document.createElement("canvas");
+
+    canvas.width = width;
+    canvas.height = height;
+
+    const ctx =
+      canvas.getContext("2d");
+
+    // White fill first — the clip() below only restricts
+    // what gets drawn AFTER it's applied, so this base fill
+    // stays visible outside the polygon but inside the box.
+    ctx.fillStyle = "#ffffff";
+
+    ctx.fillRect(
+      0,
+      0,
+      width,
+      height
+    );
+
+    ctx.save();
+
+    ctx.beginPath();
+
+    sourcePoints.forEach(
+      (point, index) => {
+        const x = point.x - minX;
+        const y = point.y - minY;
+
+        if (index === 0) {
+          ctx.moveTo(x, y);
+        } else {
+          ctx.lineTo(x, y);
+        }
+      }
+    );
+
+    ctx.closePath();
+    ctx.clip();
+
+    ctx.filter = buildFilterString(
+      imageBrightness,
+      imageContrast,
+      imageGrayscale
+    );
+
+    ctx.drawImage(
+      source,
+      -minX,
+      -minY
+    );
+
+    ctx.filter = "none";
+
+    ctx.restore();
+
+    return canvas;
+  };
+
+  /*
+  ========================================================
+  PERSPECTIVE "STRETCH TO RECTANGLE" WARP (free-form crop)
+
+  Alternative to the polygon clip above, used only when the
+  traced shape has exactly 4 points. Rather than cutting out
+  the quad and padding the rest with white, this computes a
+  projective transform (a "homography") that maps the 4
+  clicked corners onto a straight rectangle, then resamples
+  the source image into that rectangle — bilinearly, pixel
+  by pixel. The classic use case is exactly a tilted photo
+  of a document: click the 4 corners of the page and it gets
+  straightened + stretched to fill the frame edge-to-edge,
+  with no perspective skew and no white space.
+
+  The math (computeUnitSquareToQuadMatrix) is the standard
+  "unit square → quadrilateral" projective mapping (Paul
+  Heckbert, "Fundamentals of Texture Mapping and Image
+  Warping", 1989). Because the *destination* here is always
+  an axis-aligned rectangle, mapping a destination pixel back
+  to its source pixel is just: normalize the destination
+  pixel to the unit square (x/W, y/H), then run it through
+  that one matrix — no separate matrix inversion needed.
+  ========================================================
+  */
+
+  // Reorders 4 arbitrary quad corners into a canonical
+  // top-left, top-right, bottom-right, bottom-left sequence,
+  // based on their actual geometry rather than the order the
+  // user happened to click them in. Without this, tracing the
+  // corners starting from a different corner, or in the
+  // opposite direction (counter-clockwise instead of
+  // clockwise), made the warped result come out mirrored or
+  // rotated relative to the real photo. Uses the standard
+  // "sum/difference" trick: the top-left corner has the
+  // smallest (x + y), the bottom-right has the largest; the
+  // top-right corner has the largest (x - y), the bottom-left
+  // has the smallest.
+  const orderQuadCorners = (points) => {
+    const sums = points.map(
+      (point) => point.x + point.y
+    );
+
+    const diffs = points.map(
+      (point) => point.x - point.y
+    );
+
+    const topLeftIndex = sums.indexOf(Math.min(...sums));
+    const bottomRightIndex = sums.indexOf(Math.max(...sums));
+    const topRightIndex = diffs.indexOf(Math.max(...diffs));
+    const bottomLeftIndex = diffs.indexOf(Math.min(...diffs));
+
+    return [
+      points[topLeftIndex],
+      points[topRightIndex],
+      points[bottomRightIndex],
+      points[bottomLeftIndex],
+    ];
+  };
+
+  // Given 4 quad corners already in top-left, top-right,
+  // bottom-right, bottom-left order, returns the 3x3-ish
+  // coefficients {a..i} of the matrix that maps the unit
+  // square (0,0)-(1,1) onto that quad.
+  const computeUnitSquareToQuadMatrix = (points) => {
+    const [p0, p1, p2, p3] = points;
+
+    const dx1 = p1.x - p2.x;
+    const dx2 = p3.x - p2.x;
+    const dx3 = p0.x - p1.x + p2.x - p3.x;
+
+    const dy1 = p1.y - p2.y;
+    const dy2 = p3.y - p2.y;
+    const dy3 = p0.y - p1.y + p2.y - p3.y;
+
+    let a13 = 0;
+    let a23 = 0;
+
+    const isAffine =
+      Math.abs(dx3) < 1e-9 &&
+      Math.abs(dy3) < 1e-9;
+
+    if (!isAffine) {
+      const denom = dx1 * dy2 - dx2 * dy1;
+
+      if (Math.abs(denom) > 1e-9) {
+        a13 = (dx3 * dy2 - dx2 * dy3) / denom;
+        a23 = (dx1 * dy3 - dx3 * dy1) / denom;
+      }
+    }
+
+    const a = p1.x - p0.x + a13 * p1.x;
+    const b = p3.x - p0.x + a23 * p3.x;
+    const c = p0.x;
+
+    const d = p1.y - p0.y + a13 * p1.y;
+    const e = p3.y - p0.y + a23 * p3.y;
+    const f = p0.y;
+
+    return { a, b, c, d, e, f, g: a13, h: a23, i: 1 };
+  };
+
+  // Maps a point (u, v) in the unit square through the matrix
+  // above to get the corresponding point in the quad.
+  const mapUnitSquareToQuad = (matrix, u, v) => {
+    const { a, b, c, d, e, f, g, h, i } = matrix;
+
+    const w = g * u + h * v + i;
+    const safeW = Math.abs(w) > 1e-9 ? w : 1e-9;
+
+    return {
+      x: (a * u + b * v + c) / safeW,
+      y: (d * u + e * v + f) / safeW,
+    };
+  };
+
+  // Bilinear sample of an ImageData at a (possibly
+  // fractional) source pixel coordinate. Coordinates are
+  // clamped to stay on the source canvas.
+  const sampleBilinear = (imageData, x, y) => {
+    const { data, width, height } = imageData;
+
+    const clampedX = Math.min(
+      Math.max(x, 0),
+      width - 1
+    );
+
+    const clampedY = Math.min(
+      Math.max(y, 0),
+      height - 1
+    );
+
+    const x0 = Math.floor(clampedX);
+    const y0 = Math.floor(clampedY);
+    const x1 = Math.min(width - 1, x0 + 1);
+    const y1 = Math.min(height - 1, y0 + 1);
+
+    const tx = clampedX - x0;
+    const ty = clampedY - y0;
+
+    const readPixel = (px, py) => {
+      const idx = (py * width + px) * 4;
+
+      return [
+        data[idx],
+        data[idx + 1],
+        data[idx + 2],
+        data[idx + 3],
+      ];
+    };
+
+    const p00 = readPixel(x0, y0);
+    const p10 = readPixel(x1, y0);
+    const p01 = readPixel(x0, y1);
+    const p11 = readPixel(x1, y1);
+
+    const lerp = (start, end, t) =>
+      start + (end - start) * t;
+
+    const result = [0, 0, 0, 0];
+
+    for (let channel = 0; channel < 4; channel++) {
+      const top = lerp(
+        p00[channel],
+        p10[channel],
+        tx
+      );
+
+      const bottom = lerp(
+        p01[channel],
+        p11[channel],
+        tx
+      );
+
+      result[channel] = lerp(top, bottom, ty);
+    }
+
+    return result;
+  };
+
+  // Straightened output size: the longer of the quad's two
+  // "horizontal" edges becomes the output width, the longer
+  // of its two "vertical" edges becomes the output height —
+  // the usual approach for document-style perspective
+  // correction, so the result isn't arbitrarily stretched
+  // beyond what the source actually contained.
+  const computeStretchOutputSize = (points) => {
+    const [p0, p1, p2, p3] = points;
+
+    const distance = (a, b) =>
+      Math.hypot(a.x - b.x, a.y - b.y);
+
+    const topWidth = distance(p0, p1);
+    const bottomWidth = distance(p3, p2);
+    const leftHeight = distance(p0, p3);
+    const rightHeight = distance(p1, p2);
+
+    const width = Math.max(topWidth, bottomWidth);
+    const height = Math.max(leftHeight, rightHeight);
+
+    return {
+      width: Math.max(1, Math.round(width)),
+      height: Math.max(1, Math.round(height)),
+    };
+  };
+
+  // Returns a canvas holding the straightened, stretched
+  // result, or null if the shape isn't a 4-point quad.
+  const createPerspectiveStretchedCanvas = (
+    source,
+    pointsPct,
+    imageBrightness = 100,
+    imageContrast = 100,
+    imageGrayscale = false
+  ) => {
+    if (
+      pointsPct.length !==
+      POLYGON_STRETCH_POINT_COUNT
+    ) {
+      return null;
+    }
+
+    const rawSourcePoints = pointsPct.map(
+      (point) => ({
+        x: (point.xPct / 100) * source.width,
+        y: (point.yPct / 100) * source.height,
+      })
+    );
+
+    // Reorder into top-left/top-right/bottom-right/bottom-left
+    // by actual position — see orderQuadCorners above for why.
+    const sourcePoints = orderQuadCorners(
+      rawSourcePoints
+    );
+
+    const { width: outWidth, height: outHeight } =
+      computeStretchOutputSize(sourcePoints);
+
+    // Bake brightness/contrast/grayscale in once, up front,
+    // by drawing the source through the filter onto an
+    // offscreen canvas we can then read raw pixels from.
+    const sourceCanvas =
+      document.createElement("canvas");
+
+    sourceCanvas.width = source.width;
+    sourceCanvas.height = source.height;
+
+    const sourceCtx =
+      sourceCanvas.getContext("2d");
+
+    sourceCtx.filter = buildFilterString(
+      imageBrightness,
+      imageContrast,
+      imageGrayscale
+    );
+
+    sourceCtx.drawImage(source, 0, 0);
+
+    sourceCtx.filter = "none";
+
+    const sourceImageData = sourceCtx.getImageData(
+      0,
+      0,
+      source.width,
+      source.height
+    );
+
+    const matrix = computeUnitSquareToQuadMatrix(
+      sourcePoints
+    );
+
+    const outputCanvas =
+      document.createElement("canvas");
+
+    outputCanvas.width = outWidth;
+    outputCanvas.height = outHeight;
+
+    const outputCtx =
+      outputCanvas.getContext("2d");
+
+    const outputImageData = outputCtx.createImageData(
+      outWidth,
+      outHeight
+    );
+
+    for (let y = 0; y < outHeight; y++) {
+      const v = (y + 0.5) / outHeight;
+
+      for (let x = 0; x < outWidth; x++) {
+        const u = (x + 0.5) / outWidth;
+
+        const { x: srcX, y: srcY } =
+          mapUnitSquareToQuad(matrix, u, v);
+
+        const pixel = sampleBilinear(
+          sourceImageData,
+          srcX,
+          srcY
+        );
+
+        const idx = (y * outWidth + x) * 4;
+
+        outputImageData.data[idx] = pixel[0];
+        outputImageData.data[idx + 1] = pixel[1];
+        outputImageData.data[idx + 2] = pixel[2];
+        outputImageData.data[idx + 3] = pixel[3];
+      }
+    }
+
+    outputCtx.putImageData(outputImageData, 0, 0);
+
+    return outputCanvas;
   };
 
   /*
@@ -864,6 +1659,35 @@ function App() {
 
   /*
   ========================================================
+  RE-MEASURE FREE-CROP CONTAINER WHEN THE EDITOR IMAGE
+  (RE)LOADS OR THE CROP MODE CHANGES
+
+  The ResizeObserver above catches window/layout resizes,
+  but the container doesn't exist in the DOM at all until
+  the edit overlay + freeform mode are showing, and its
+  size can also change the moment a new (rotated) editor
+  image is swapped in. Re-measuring here keeps the SVG
+  viewBox in sync with those moments too.
+  ========================================================
+  */
+
+  useEffect(() => {
+    if (cropMode !== "freeform") return;
+
+    const container = freeCropContainerRef.current;
+
+    if (!container) return;
+
+    const rect = container.getBoundingClientRect();
+
+    setFreeCropContainerSize({
+      width: rect.width,
+      height: rect.height,
+    });
+  }, [cropMode, editorImageUrl]);
+
+  /*
+  ========================================================
   SELECT IMAGE
   ========================================================
   */
@@ -898,6 +1722,40 @@ function App() {
         : null
     );
 
+    /*
+    Same idea for the free-form crop: the saved points are
+    only valid for the rotation they were traced at.
+    */
+
+    const freeCropIsStillValid =
+      image.freeCropPoints &&
+      image.freeCropPoints.length >=
+        POLYGON_MIN_POINTS &&
+      (image.freeCropRotation ?? 0) ===
+        (image.rotation || 0);
+
+    setPolygonPoints(
+      freeCropIsStillValid
+        ? image.freeCropPoints
+        : []
+    );
+
+    setIsPolygonClosed(
+      Boolean(freeCropIsStillValid)
+    );
+
+    setStretchToRectangle(
+      freeCropIsStillValid
+        ? Boolean(image.freeCropStretch)
+        : false
+    );
+
+    setCropMode(
+      image.cropType === "freeform"
+        ? "freeform"
+        : "rectangle"
+    );
+
     setRotation(
       image.rotation || 0
     );
@@ -914,6 +1772,10 @@ function App() {
       image.zoom ?? 1
     );
 
+    setGrayscale(
+      image.grayscale ?? false
+    );
+
     setProcessedPreview(
       image.processedUrl || null
     );
@@ -922,6 +1784,120 @@ function App() {
   const closeEditor = () => {
     setSelectedIndex(null);
     setProcessedPreview(null);
+    setPolygonPoints([]);
+    setIsPolygonClosed(false);
+    setStretchToRectangle(false);
+  };
+
+  /*
+  ========================================================
+  FREE-FORM CROP — POINT PLACEMENT
+
+  Every click on the free-crop image adds a point, unless
+  the shape is already closed, or the click landed close
+  enough to the first point — in which case it closes the
+  shape instead of adding a new one. Coordinates are stored
+  as percentages of the displayed image so they stay valid
+  regardless of how large the editor renders it.
+  ========================================================
+  */
+
+  const handleFreeCropContainerClick = (
+    event
+  ) => {
+    if (isPolygonClosed) return;
+
+    const container =
+      freeCropContainerRef.current;
+
+    if (!container) return;
+
+    const rect =
+      container.getBoundingClientRect();
+
+    if (
+      rect.width === 0 ||
+      rect.height === 0
+    ) {
+      return;
+    }
+
+    const xPct = Math.min(
+      100,
+      Math.max(
+        0,
+        ((event.clientX - rect.left) /
+          rect.width) *
+          100
+      )
+    );
+
+    const yPct = Math.min(
+      100,
+      Math.max(
+        0,
+        ((event.clientY - rect.top) /
+          rect.height) *
+          100
+      )
+    );
+
+    if (
+      polygonPoints.length >=
+      POLYGON_MIN_POINTS
+    ) {
+      const first =
+        polygonPoints[0];
+
+      const dx =
+        xPct - first.xPct;
+
+      const dy =
+        yPct - first.yPct;
+
+      const distance =
+        Math.sqrt(
+          dx * dx + dy * dy
+        );
+
+      if (
+        distance <=
+        POLYGON_CLOSE_THRESHOLD_PCT
+      ) {
+        setIsPolygonClosed(true);
+        return;
+      }
+    }
+
+    setPolygonPoints(
+      (previous) => [
+        ...previous,
+        { xPct, yPct },
+      ]
+    );
+  };
+
+  const undoLastPolygonPoint = () => {
+    if (isPolygonClosed) {
+      setIsPolygonClosed(false);
+      return;
+    }
+
+    setPolygonPoints(
+      (previous) =>
+        previous.slice(0, -1)
+    );
+  };
+
+  const clearPolygon = () => {
+    setPolygonPoints([]);
+    setIsPolygonClosed(false);
+    setStretchToRectangle(false);
+  };
+
+  const switchCropMode = (mode) => {
+    if (mode === cropMode) return;
+    setCropMode(mode);
   };
 
   /*
@@ -1061,7 +2037,8 @@ function App() {
     targetWidth,
     targetHeight,
     imageBrightness = 100,
-    imageContrast = 100
+    imageContrast = 100,
+    imageGrayscale = false
   ) => {
     const canvas =
       document.createElement("canvas");
@@ -1109,8 +2086,11 @@ function App() {
         drawHeight) /
       2;
 
-    ctx.filter =
-      `brightness(${imageBrightness}%) contrast(${imageContrast}%)`;
+    ctx.filter = buildFilterString(
+      imageBrightness,
+      imageContrast,
+      imageGrayscale
+    );
 
     ctx.drawImage(
       source,
@@ -1225,6 +2205,56 @@ function App() {
       );
 
     if (
+      cropMode === "freeform" &&
+      isPolygonClosed &&
+      polygonPoints.length >=
+        POLYGON_MIN_POINTS
+    ) {
+      if (
+        stretchToRectangle &&
+        polygonPoints.length ===
+          POLYGON_STRETCH_POINT_COUNT
+      ) {
+        const stretched =
+          createPerspectiveStretchedCanvas(
+            source,
+            polygonPoints,
+            brightness,
+            contrast,
+            grayscale
+          );
+
+        if (stretched) {
+          // Brightness/contrast/grayscale are already baked
+          // into the stretched canvas.
+          return fitImageContain(
+            stretched,
+            grid.photoWidthPx,
+            grid.photoHeightPx
+          );
+        }
+      }
+
+      const clipped =
+        createPolygonClippedCanvas(
+          source,
+          polygonPoints,
+          brightness,
+          contrast,
+          grayscale
+        );
+
+      // Brightness/contrast/grayscale are already baked
+      // into the clipped canvas, so no need to pass them
+      // again here.
+      return fitImageContain(
+        clipped,
+        grid.photoWidthPx,
+        grid.photoHeightPx
+      );
+    }
+
+    if (
       completedCrop &&
       completedCrop.width > 0 &&
       completedCrop.height > 0
@@ -1309,7 +2339,8 @@ function App() {
         grid.photoWidthPx,
         grid.photoHeightPx,
         brightness,
-        contrast
+        contrast,
+        grayscale
       );
     }
 
@@ -1320,7 +2351,8 @@ function App() {
       grid.photoWidthPx,
       grid.photoHeightPx,
       brightness,
-      contrast
+      contrast,
+      grayscale
     );
   };
 
@@ -1351,6 +2383,47 @@ function App() {
       await loadImage(
         editorImageUrl
       );
+
+    if (
+      cropMode === "freeform" &&
+      isPolygonClosed &&
+      polygonPoints.length >=
+        POLYGON_MIN_POINTS
+    ) {
+      if (
+        stretchToRectangle &&
+        polygonPoints.length ===
+          POLYGON_STRETCH_POINT_COUNT
+      ) {
+        const stretched =
+          createPerspectiveStretchedCanvas(
+            source,
+            polygonPoints,
+            brightness,
+            contrast,
+            grayscale
+          );
+
+        if (stretched) {
+          return stretched.toDataURL(
+            "image/png"
+          );
+        }
+      }
+
+      const clipped =
+        createPolygonClippedCanvas(
+          source,
+          polygonPoints,
+          brightness,
+          contrast,
+          grayscale
+        );
+
+      return clipped.toDataURL(
+        "image/png"
+      );
+    }
 
     if (
       completedCrop &&
@@ -1435,12 +2508,13 @@ function App() {
         cropWidth,
         cropHeight,
         brightness,
-        contrast
+        contrast,
+        grayscale
       );
     }
 
     // No manual crop drawn — whole rotated source at its
-    // native size, brightness/contrast baked in.
+    // native size, brightness/contrast/grayscale baked in.
     const canvas =
       document.createElement("canvas");
 
@@ -1453,8 +2527,11 @@ function App() {
     const ctx =
       canvas.getContext("2d");
 
-    ctx.filter =
-      `brightness(${brightness}%) contrast(${contrast}%)`;
+    ctx.filter = buildFilterString(
+      brightness,
+      contrast,
+      grayscale
+    );
 
     ctx.drawImage(
       source,
@@ -1519,7 +2596,12 @@ function App() {
     brightness,
     contrast,
     zoom,
+    grayscale,
     selectedLayout,
+    cropMode,
+    polygonPoints,
+    isPolygonClosed,
+    stretchToRectangle,
   ]);
 
   /*
@@ -1528,10 +2610,11 @@ function App() {
   the frame. This is either the stored `contentUrl` (the
   cropped photo at its own natural size), or — if the user
   never opened the editor — the original upload with its
-  brightness/contrast baked in. Frame rotation is applied
-  to THIS (see getPrintableImage), never to something
-  already padded/fit to the frame, so rotating repeatedly
-  never shrinks the photo or compounds letterboxing.
+  brightness/contrast/grayscale baked in. Frame rotation is
+  applied to THIS (see getPrintableImage), never to
+  something already padded/fit to the frame, so rotating
+  repeatedly never shrinks the photo or compounds
+  letterboxing.
   ========================================================
   */
 
@@ -1549,8 +2632,11 @@ function App() {
 
     const ctx = canvas.getContext("2d");
 
-    ctx.filter =
-      `brightness(${image.brightness ?? 100}%) contrast(${image.contrast ?? 100}%)`;
+    ctx.filter = buildFilterString(
+      image.brightness ?? 100,
+      image.contrast ?? 100,
+      image.grayscale ?? false
+    );
 
     ctx.drawImage(source, 0, 0);
 
@@ -1646,6 +2732,12 @@ function App() {
         (previous + 90) %
         360
     );
+
+    // Points were traced against the previous orientation —
+    // they'd land on the wrong part of the image now.
+    setPolygonPoints([]);
+    setIsPolygonClosed(false);
+    setStretchToRectangle(false);
   };
 
   /*
@@ -1680,11 +2772,21 @@ function App() {
 
     setZoom(1);
 
+    setGrayscale(false);
+
     setCrop(null);
 
     setCompletedCrop(null);
 
     setProcessedPreview(null);
+
+    setPolygonPoints([]);
+
+    setIsPolygonClosed(false);
+
+    setStretchToRectangle(false);
+
+    setCropMode("rectangle");
 
     if (!editorImageUrl) return;
 
@@ -1722,6 +2824,18 @@ function App() {
     const content =
       await createContentImage();
 
+    const usedFreeCrop =
+      cropMode === "freeform" &&
+      isPolygonClosed &&
+      polygonPoints.length >=
+        POLYGON_MIN_POINTS;
+
+    const usedStretch =
+      usedFreeCrop &&
+      stretchToRectangle &&
+      polygonPoints.length ===
+        POLYGON_STRETCH_POINT_COUNT;
+
     const updatedImages =
       images.map(
         (image, index) =>
@@ -1729,12 +2843,46 @@ function App() {
             ? {
                 ...image,
 
-                crop,
+                // Only one crop tool is "active" per photo —
+                // whichever was used, clear the other so a
+                // stale rectangle/polygon never gets restored
+                // by mistake next time this photo is opened.
+                crop:
+                  usedFreeCrop
+                    ? null
+                    : crop,
 
-                completedCrop,
+                completedCrop:
+                  usedFreeCrop
+                    ? null
+                    : completedCrop,
 
                 cropRotation:
-                  rotation,
+                  usedFreeCrop
+                    ? null
+                    : rotation,
+
+                freeCropPoints:
+                  usedFreeCrop
+                    ? polygonPoints
+                    : null,
+
+                freeCropRotation:
+                  usedFreeCrop
+                    ? rotation
+                    : null,
+
+                freeCropStretch:
+                  usedFreeCrop
+                    ? usedStretch
+                    : false,
+
+                cropType:
+                  usedFreeCrop
+                    ? "freeform"
+                    : completedCrop
+                    ? "rectangle"
+                    : null,
 
                 rotation,
 
@@ -1743,6 +2891,8 @@ function App() {
                 contrast,
 
                 zoom,
+
+                grayscale,
 
                 // Frame-fitted, for the thumbnail preview.
                 processedUrl:
@@ -1768,6 +2918,12 @@ function App() {
     setSelectedIndex(null);
 
     setProcessedPreview(null);
+
+    setPolygonPoints([]);
+
+    setIsPolygonClosed(false);
+
+    setStretchToRectangle(false);
 
     try {
       setIsGeneratingPreview(
@@ -1977,6 +3133,11 @@ function App() {
         activeGrid.a4HeightPx
       );
 
+      const radiusPx =
+        borderRounded
+          ? mmToPx(borderRadiusMm)
+          : 0;
+
       for (
         let i = 0;
         i < pageImages.length;
@@ -2000,19 +3161,45 @@ function App() {
             imageUrl
           );
 
-        ctx.drawImage(
-          img,
-          cell.x,
-          cell.y,
-          cell.width,
-          cell.height
-        );
+        if (radiusPx > 0) {
+          ctx.save();
+
+          drawRoundedRectPath(
+            ctx,
+            cell.x,
+            cell.y,
+            cell.width,
+            cell.height,
+            radiusPx
+          );
+
+          ctx.clip();
+
+          ctx.drawImage(
+            img,
+            cell.x,
+            cell.y,
+            cell.width,
+            cell.height
+          );
+
+          ctx.restore();
+        } else {
+          ctx.drawImage(
+            img,
+            cell.x,
+            cell.y,
+            cell.width,
+            cell.height
+          );
+        }
 
         /*
         Draw the frame border, if enabled, right on top of
         the photo so it sits exactly at the photo's edges
         for the size the user picked. Border is always
-        black.
+        black, and follows the same rounded corners as the
+        photo above when "Rounded corners" is on.
         */
 
         if (borderEnabled && borderWidthMm > 0) {
@@ -2025,17 +3212,31 @@ function App() {
           ctx.lineWidth =
             borderWidthPx;
 
-          ctx.strokeRect(
-            cell.x + borderWidthPx / 2,
-            cell.y + borderWidthPx / 2,
-            cell.width - borderWidthPx,
-            cell.height - borderWidthPx
-          );
+          if (radiusPx > 0) {
+            drawRoundedRectPath(
+              ctx,
+              cell.x + borderWidthPx / 2,
+              cell.y + borderWidthPx / 2,
+              cell.width - borderWidthPx,
+              cell.height - borderWidthPx,
+              Math.max(0, radiusPx - borderWidthPx / 2)
+            );
+
+            ctx.stroke();
+          } else {
+            ctx.strokeRect(
+              cell.x + borderWidthPx / 2,
+              cell.y + borderWidthPx / 2,
+              cell.width - borderWidthPx,
+              cell.height - borderWidthPx
+            );
+          }
         }
       }
 
       return canvas.toDataURL(
-        "image/png"
+        "image/jpeg",
+        PDF_IMAGE_QUALITY
       );
     };
 
@@ -2168,6 +3369,8 @@ function App() {
     customGapMm,
     borderEnabled,
     borderWidthMm,
+    borderRounded,
+    borderRadiusMm,
   ]);
 
   /*
@@ -2264,7 +3467,7 @@ function App() {
 
           pdf.addImage(
             pages[i],
-            "PNG",
+            "JPEG",
             0,
             0,
             pageWidthMm,
@@ -2304,6 +3507,9 @@ function App() {
     ((borderWidthMm - BORDER_MIN_MM) /
       (BORDER_MAX_MM - BORDER_MIN_MM)) *
     100;
+
+  const borderRadiusSliderFillPct =
+    (borderRadiusMm / 10) * 100;
 
   return (
     <div className="app">
@@ -2849,6 +4055,76 @@ function App() {
               </div>
             )}
 
+            <div className="toggle-row">
+
+              <div className="toggle-row-text">
+                <span className="toggle-row-title">
+                  Rounded corners
+                </span>
+                <span className="toggle-row-sub">
+                  Rounds the corners of each photo and its
+                  border
+                </span>
+              </div>
+
+              <button
+                type="button"
+                role="switch"
+                aria-checked={borderRounded}
+                className={`switch ${
+                  borderRounded ? "on" : ""
+                }`}
+                onClick={() => {
+                  setBorderRounded(
+                    (previous) => !previous
+                  );
+
+                  setA4Pages([]);
+                }}
+              >
+                <span className="switch-knob" />
+              </button>
+
+            </div>
+
+            {borderRounded && (
+              <div className="border-thickness-panel">
+
+                <div className="border-thickness-label">
+                  <span>Corner radius</span>
+                  <span className="mono">
+                    {borderRadiusMm.toFixed(1)}mm
+                  </span>
+                </div>
+
+                <input
+                  type="range"
+                  className="border-slider"
+                  min={0}
+                  max={10}
+                  step={0.5}
+                  value={borderRadiusMm}
+                  style={{
+                    "--slider-fill": `${borderRadiusSliderFillPct}%`,
+                  }}
+                  onChange={(event) => {
+                    setBorderRadiusMm(
+                      Number(event.target.value)
+                    );
+
+                    setA4Pages([]);
+                  }}
+                  aria-label="Corner radius"
+                />
+
+                <div className="border-slider-ticks">
+                  <span>0mm</span>
+                  <span>10mm</span>
+                </div>
+
+              </div>
+            )}
+
             <p className="panel-hint">
               The border is drawn right at the edge of each{" "}
               {pxToMm(grid.photoWidthPx)}×
@@ -2970,8 +4246,9 @@ function App() {
                 </h2>
 
                 <p>
-                  Click a photo to crop and adjust it. Rotate
-                  photos from the A4 preview below.
+                  Click a photo to crop and adjust it. Drag a
+                  photo — or use the ‹ › buttons — to reorder
+                  it. Rotate photos from the A4 preview below.
                 </p>
               </div>
 
@@ -3044,6 +4321,13 @@ function App() {
                       selectedIndex ===
                       index;
 
+                    const isDraggedThumb =
+                      draggedIndex === index;
+
+                    const isDragOverThumb =
+                      dragOverIndex === index &&
+                      draggedIndex !== index;
+
                     return (
                       <div
                         key={
@@ -3053,7 +4337,31 @@ function App() {
                           isSelected
                             ? "selected"
                             : ""
+                        } ${
+                          isDraggedThumb
+                            ? "dragging"
+                            : ""
+                        } ${
+                          isDragOverThumb
+                            ? "drag-over"
+                            : ""
                         }`}
+                        draggable
+                        onDragStart={handleThumbDragStart(
+                          index
+                        )}
+                        onDragOver={handleThumbDragOver(
+                          index
+                        )}
+                        onDragLeave={handleThumbDragLeave(
+                          index
+                        )}
+                        onDrop={handleThumbDrop(
+                          index
+                        )}
+                        onDragEnd={
+                          handleThumbDragEnd
+                        }
                         onClick={() =>
                           selectImage(
                             index
@@ -3077,6 +4385,47 @@ function App() {
 
                         <div className="thumb-number">
                           {index + 1}
+                        </div>
+
+                        <div className="thumb-reorder">
+
+                          <button
+                            type="button"
+                            className="thumb-move-btn"
+                            title="Move earlier"
+                            disabled={index === 0}
+                            onClick={(event) => {
+                              event.stopPropagation();
+
+                              moveImage(
+                                index,
+                                index - 1
+                              );
+                            }}
+                          >
+                            ‹
+                          </button>
+
+                          <button
+                            type="button"
+                            className="thumb-move-btn"
+                            title="Move later"
+                            disabled={
+                              index ===
+                              images.length - 1
+                            }
+                            onClick={(event) => {
+                              event.stopPropagation();
+
+                              moveImage(
+                                index,
+                                index + 1
+                              );
+                            }}
+                          >
+                            ›
+                          </button>
+
                         </div>
 
                         <button
@@ -3387,59 +4736,369 @@ function App() {
 
                 <div className="edit-frame-crop">
 
-                  {editorImageUrl && (
-                    <ReactCrop
-                      crop={crop}
-                      onChange={
-                        handleCropChange
+                  <div className="crop-mode-toggle">
+
+                    <button
+                      type="button"
+                      className={
+                        cropMode ===
+                        "rectangle"
+                          ? "active"
+                          : ""
                       }
-                      onComplete={
-                        handleCropComplete
-                      }
-                      keepSelection={
-                        true
-                      }
-                      ruleOfThirds={
-                        true
+                      onClick={() =>
+                        switchCropMode(
+                          "rectangle"
+                        )
                       }
                     >
-                      <img
-                        ref={
-                          imageRef
-                        }
-                        src={
-                          editorImageUrl
-                        }
-                        alt="Crop"
-                        onLoad={
-                          handleImageLoad
-                        }
-                        style={{
-                          maxWidth:
-                            "100%",
-                          maxHeight:
-                            "380px",
-                          display:
-                            "block",
-                          filter:
-                            `brightness(${brightness}%) contrast(${contrast}%)`,
-                        }}
-                      />
-                    </ReactCrop>
-                  )}
+                      Rectangle Crop
+                    </button>
 
-                  <small className="crop-hint mono">
-                    Free-form crop — drag any size or shape.
-                    It's fit inside the{" "}
-                    {pxToMm(
-                      grid.photoWidthPx
-                    )}
-                    ×
-                    {pxToMm(
-                      grid.photoHeightPx
-                    )}
-                    mm frame without stretching.
-                  </small>
+                    <button
+                      type="button"
+                      className={
+                        cropMode ===
+                        "freeform"
+                          ? "active"
+                          : ""
+                      }
+                      onClick={() =>
+                        switchCropMode(
+                          "freeform"
+                        )
+                      }
+                    >
+                      Free-Form Crop
+                    </button>
+
+                  </div>
+
+                  {cropMode === "rectangle" ? (
+                    <>
+
+                      {editorImageUrl && (
+                        <ReactCrop
+                          crop={crop}
+                          onChange={
+                            handleCropChange
+                          }
+                          onComplete={
+                            handleCropComplete
+                          }
+                          keepSelection={
+                            true
+                          }
+                          ruleOfThirds={
+                            true
+                          }
+                        >
+                          <img
+                            ref={
+                              imageRef
+                            }
+                            src={
+                              editorImageUrl
+                            }
+                            alt="Crop"
+                            onLoad={
+                              handleImageLoad
+                            }
+                            style={{
+                              maxWidth:
+                                "100%",
+                              maxHeight:
+                                "380px",
+                              display:
+                                "block",
+                              filter:
+                                buildFilterString(
+                                  brightness,
+                                  contrast,
+                                  grayscale
+                                ),
+                            }}
+                          />
+                        </ReactCrop>
+                      )}
+
+                      <small className="crop-hint mono">
+                        Drag any size or shape. It's fit
+                        inside the{" "}
+                        {pxToMm(
+                          grid.photoWidthPx
+                        )}
+                        ×
+                        {pxToMm(
+                          grid.photoHeightPx
+                        )}
+                        mm frame without stretching.
+                      </small>
+
+                    </>
+                  ) : (
+                    <>
+
+                      {editorImageUrl && (
+                        <div
+                          className="free-crop-container"
+                          ref={
+                            freeCropContainerRef
+                          }
+                          onClick={
+                            handleFreeCropContainerClick
+                          }
+                          data-tooltip={
+                            isPolygonClosed
+                              ? "Shape closed — switch to a different tool to edit it further"
+                              : polygonPoints.length <
+                                POLYGON_MIN_POINTS
+                              ? "Click to place a point and trace an outline"
+                              : "Click again, or click the white start point to close the shape"
+                          }
+                        >
+
+                          <img
+                            src={
+                              editorImageUrl
+                            }
+                            alt="Free-form crop"
+                            draggable={
+                              false
+                            }
+                            onLoad={() => {
+                              // The container's size can
+                              // change the instant the
+                              // <img> finishes loading and
+                              // takes up its natural space —
+                              // re-measure right after so the
+                              // SVG viewBox (and therefore
+                              // point circles) line up from
+                              // the very first frame.
+                              const container =
+                                freeCropContainerRef.current;
+
+                              if (!container) return;
+
+                              const rect =
+                                container.getBoundingClientRect();
+
+                              setFreeCropContainerSize({
+                                width: rect.width,
+                                height: rect.height,
+                              });
+                            }}
+                            style={{
+                              display:
+                                "block",
+                              maxWidth:
+                                "100%",
+                              maxHeight:
+                                "380px",
+                              filter:
+                                buildFilterString(
+                                  brightness,
+                                  contrast,
+                                  grayscale
+                                ),
+                            }}
+                          />
+
+                          <svg
+                            className="free-crop-overlay"
+                            viewBox={`0 0 ${
+                              freeCropContainerSize.width || 1
+                            } ${
+                              freeCropContainerSize.height || 1
+                            }`}
+                            preserveAspectRatio="none"
+                          >
+
+                            {polygonPoints.length >
+                              1 && (
+                              <polyline
+                                points={polygonPoints
+                                  .map(
+                                    (point) =>
+                                      `${
+                                        (point.xPct / 100) *
+                                        freeCropContainerSize.width
+                                      },${
+                                        (point.yPct / 100) *
+                                        freeCropContainerSize.height
+                                      }`
+                                  )
+                                  .join(
+                                    " "
+                                  )}
+                                fill={
+                                  isPolygonClosed
+                                    ? "rgba(34,197,94,0.25)"
+                                    : "none"
+                                }
+                                stroke="#22c55e"
+                                strokeWidth="2"
+                              />
+                            )}
+
+                            {isPolygonClosed &&
+                              polygonPoints.length >
+                                0 && (
+                                <line
+                                  x1={
+                                    (polygonPoints[
+                                      polygonPoints.length -
+                                        1
+                                    ].xPct /
+                                      100) *
+                                    freeCropContainerSize.width
+                                  }
+                                  y1={
+                                    (polygonPoints[
+                                      polygonPoints.length -
+                                        1
+                                    ].yPct /
+                                      100) *
+                                    freeCropContainerSize.height
+                                  }
+                                  x2={
+                                    (polygonPoints[0]
+                                      .xPct /
+                                      100) *
+                                    freeCropContainerSize.width
+                                  }
+                                  y2={
+                                    (polygonPoints[0]
+                                      .yPct /
+                                      100) *
+                                    freeCropContainerSize.height
+                                  }
+                                  stroke="#22c55e"
+                                  strokeWidth="2"
+                                />
+                              )}
+
+                            {polygonPoints.map(
+                              (point, index) => (
+                                <circle
+                                  key={
+                                    index
+                                  }
+                                  cx={
+                                    (point.xPct / 100) *
+                                    freeCropContainerSize.width
+                                  }
+                                  cy={
+                                    (point.yPct / 100) *
+                                    freeCropContainerSize.height
+                                  }
+                                  r={
+                                    index === 0
+                                      ? 7
+                                      : 4.5
+                                  }
+                                  fill={
+                                    index === 0
+                                      ? "#ffffff"
+                                      : "#22c55e"
+                                  }
+                                  stroke="#22c55e"
+                                  strokeWidth="1.5"
+                                />
+                              )
+                            )}
+
+                          </svg>
+
+                        </div>
+                      )}
+
+                      <div className="free-crop-actions">
+
+                        <button
+                          type="button"
+                          onClick={
+                            undoLastPolygonPoint
+                          }
+                          disabled={
+                            polygonPoints.length ===
+                            0
+                          }
+                        >
+                          {isPolygonClosed
+                            ? "Reopen shape"
+                            : "Undo point"}
+                        </button>
+
+                        <button
+                          type="button"
+                          onClick={
+                            clearPolygon
+                          }
+                          disabled={
+                            polygonPoints.length ===
+                            0
+                          }
+                        >
+                          Clear
+                        </button>
+
+                      </div>
+
+                      {polygonPoints.length ===
+                        POLYGON_STRETCH_POINT_COUNT && (
+                        <div className="toggle-row">
+
+                          <div className="toggle-row-text">
+                            <span className="toggle-row-title">
+                              Stretch to rectangle
+                            </span>
+                            <span className="toggle-row-sub">
+                              Straightens the 4 points into a
+                              full rectangle instead of
+                              leaving white space around them
+                              — use this for a tilted photo of
+                              a document or page.
+                            </span>
+                          </div>
+
+                          <button
+                            type="button"
+                            role="switch"
+                            aria-checked={stretchToRectangle}
+                            className={`switch ${
+                              stretchToRectangle ? "on" : ""
+                            }`}
+                            onClick={() =>
+                              setStretchToRectangle(
+                                (previous) => !previous
+                              )
+                            }
+                          >
+                            <span className="switch-knob" />
+                          </button>
+
+                        </div>
+                      )}
+
+                      <small className="crop-hint mono">
+                        {isPolygonClosed
+                          ? stretchToRectangle &&
+                            polygonPoints.length ===
+                              POLYGON_STRETCH_POINT_COUNT
+                            ? "Shape closed — the 4 points will be straightened and stretched to fill a rectangle."
+                            : "Shape closed — it's fit inside the frame, cropped to that outline."
+                          : polygonPoints.length <
+                            POLYGON_MIN_POINTS
+                          ? "Click around the photo to trace an outline."
+                          : polygonPoints.length ===
+                            POLYGON_STRETCH_POINT_COUNT
+                          ? "Click the white starting point again to close the shape, or keep adding points for a non-rectangular outline."
+                          : "Click the white starting point again to close the shape."}
+                      </small>
+
+                    </>
+                  )}
 
                 </div>
 
@@ -3469,6 +5128,35 @@ function App() {
 
                   <div className="inline-panel-title">
                     Adjust
+                  </div>
+
+                  <div className="toggle-row">
+
+                    <div className="toggle-row-text">
+                      <span className="toggle-row-title">
+                        Black &amp; white
+                      </span>
+                      <span className="toggle-row-sub">
+                        Converts this photo to grayscale
+                      </span>
+                    </div>
+
+                    <button
+                      type="button"
+                      role="switch"
+                      aria-checked={grayscale}
+                      className={`switch ${
+                        grayscale ? "on" : ""
+                      }`}
+                      onClick={() =>
+                        setGrayscale(
+                          (previous) => !previous
+                        )
+                      }
+                    >
+                      <span className="switch-knob" />
+                    </button>
+
                   </div>
 
                   <div className="inline-control">
