@@ -121,6 +121,17 @@ const baseLayouts = {
     rows: 1,
     gapMm: 10,
   },
+
+    aadharPrint: {
+    name: "Aadhar Photo",
+    tag: "210×85mm · 1 per page",
+    mode: "fixed",
+    photoWidthMm: 85,
+    photoHeightMm: 210,
+    columns: 1,
+    rows: 1,
+    gapMm: 10,
+  },
 };
 
 /*
@@ -697,7 +708,7 @@ function App() {
       filenameCollator.compare(a.name, b.name)
     );
 
-  const addFiles = (fileList) => {
+  const addFiles = (fileList, insertAt = null) => {
     const files = sortFilesByName(
       Array.from(
         fileList || []
@@ -710,12 +721,20 @@ function App() {
       return;
     }
 
-    const newImages = files.map((file) => ({
+    let newImages = files.map((file) => ({
       id: crypto.randomUUID(),
 
       url: URL.createObjectURL(file),
 
       name: file.name,
+
+      // Manual page-break: when true, this photo always
+      // starts a fresh A4 sheet, even if the previous sheet
+      // still has empty slots. Lets you (for example) keep
+      // an Aadhar card's two sides together on one sheet,
+      // then force the PAN card onto its own sheet so the
+      // next Aadhar starts clean on the sheet after that.
+      pageBreakBefore: false,
 
       crop: null,
 
@@ -770,10 +789,42 @@ function App() {
       contentUrl: null,
     }));
 
-    setImages((previous) => [
-      ...previous,
-      ...newImages,
-    ]);
+    setImages((previous) => {
+      if (
+        insertAt === null ||
+        insertAt < 0 ||
+        insertAt > previous.length
+      ) {
+        return [...previous, ...newImages];
+      }
+
+      const updated = [...previous];
+
+      // Inserting right at a page break: the new photos
+      // should become the START of that new sheet, not get
+      // tacked onto the sheet before it. So the break flag
+      // moves from the photo that was there onto the first
+      // new photo, and is cleared from the old one (which is
+      // now pushed later in the same sheet as the new photos).
+      const targetImage = updated[insertAt];
+
+      if (targetImage?.pageBreakBefore) {
+        newImages = newImages.map((image, index) =>
+          index === 0
+            ? { ...image, pageBreakBefore: true }
+            : image
+        );
+
+        updated[insertAt] = {
+          ...targetImage,
+          pageBreakBefore: false,
+        };
+      }
+
+      updated.splice(insertAt, 0, ...newImages);
+
+      return updated;
+    });
 
     setA4Pages([]);
   };
@@ -790,6 +841,83 @@ function App() {
 
     addFiles(event.dataTransfer.files);
   };
+
+  /*
+  ========================================================
+  INSERT UPLOAD AT A PAGE BREAK
+
+  Lets the user add photos directly at a page-break divider
+  in the thumbnail grid, so a new page-break point isn't just
+  "append to the very end" — new photos land right where the
+  new sheet starts.
+  ========================================================
+  */
+
+  const handleInsertUpload =
+    (index) => (event) => {
+      addFiles(event.target.files, index);
+      event.target.value = "";
+    };
+
+  /*
+  ========================================================
+  INSERT UPLOAD INTO THE PREVIOUS PAGE
+  ========================================================
+
+  When a manual page break exists before `index`, this handler
+  inserts new photos immediately before that break. The existing
+  break remains attached to the original photo, so the newly
+  added photos fill any unused slots on the page above the
+  divider instead of incorrectly starting the new sheet.
+  ========================================================
+  */
+
+  const handleInsertIntoPreviousPage =
+    (index) => (event) => {
+      const files = sortFilesByName(
+        Array.from(
+          event.target.files || []
+        ).filter((file) =>
+          file.type.startsWith("image/")
+        )
+      );
+
+      if (files.length === 0) {
+        event.target.value = "";
+        return;
+      }
+
+      const newImages = files.map((file) => ({
+        id: crypto.randomUUID(),
+        url: URL.createObjectURL(file),
+        name: file.name,
+        pageBreakBefore: false,
+        crop: null,
+        completedCrop: null,
+        cropRotation: null,
+        freeCropPoints: null,
+        freeCropRotation: null,
+        freeCropStretch: false,
+        cropType: null,
+        rotation: 0,
+        frameRotation: 0,
+        brightness: 100,
+        contrast: 100,
+        zoom: 1,
+        grayscale: false,
+        processedUrl: null,
+        contentUrl: null,
+      }));
+
+      setImages((previous) => {
+        const updated = [...previous];
+        updated.splice(index, 0, ...newImages);
+        return updated;
+      });
+
+      setA4Pages([]);
+      event.target.value = "";
+    };
 
   /*
   ========================================================
@@ -905,6 +1033,32 @@ function App() {
   const handleThumbDragEnd = () => {
     setDraggedIndex(null);
     setDragOverIndex(null);
+  };
+
+  /*
+  ========================================================
+  PAGE BREAK TOGGLE
+
+  Flips `pageBreakBefore` for the photo at `index`. When
+  true, this photo always begins a brand-new A4 sheet in
+  `buildPageGroups` below, even if the previous sheet has
+  free slots left.
+  ========================================================
+  */
+
+  const togglePageBreak = (index) => {
+    setImages((previous) =>
+      previous.map((image, i) =>
+        i === index
+          ? {
+              ...image,
+              pageBreakBefore: !image.pageBreakBefore,
+            }
+          : image
+      )
+    );
+
+    setA4Pages([]);
   };
 
   /*
@@ -3090,13 +3244,70 @@ function App() {
             i < copies;
             i++
           ) {
-            result.push(image);
+            // A page break should fire once per photo, not
+            // once per copy of it — only the first copy of
+            // each photo keeps the original `pageBreakBefore`
+            // flag; subsequent copies never force a break.
+            result.push(
+              i === 0
+                ? image
+                : { ...image, pageBreakBefore: false }
+            );
           }
         }
       );
 
       return result;
     };
+
+  /*
+  ========================================================
+  BUILD PAGE GROUPS (respects manual page breaks)
+
+  Splits a flat list of (possibly repeated) images into
+  per-sheet groups. Normally a sheet fills up to
+  `slotsPerPage` images before starting the next one, but
+  any image flagged `pageBreakBefore` forces the CURRENT
+  sheet to close early (if it already has photos on it) so
+  that image starts a brand-new sheet — even if the current
+  sheet still has empty slots.
+  ========================================================
+  */
+
+  const buildPageGroups = (
+    imagesList,
+    activeGrid
+  ) => {
+    const groups = [];
+
+    let current = [];
+
+    imagesList.forEach((image) => {
+      if (
+        image.pageBreakBefore &&
+        current.length > 0
+      ) {
+        groups.push(current);
+        current = [];
+      }
+
+      current.push(image);
+
+      if (
+        current.length ===
+        activeGrid.slotsPerPage
+      ) {
+        groups.push(current);
+        current = [];
+      }
+    });
+
+    if (current.length > 0) {
+      groups.push(current);
+    }
+
+    return groups;
+  };
 
   /*
   ========================================================
@@ -3270,22 +3481,17 @@ function App() {
         return [];
       }
 
+      const pageGroups =
+        buildPageGroups(
+          repeatedImages,
+          activeGrid
+        );
+
       const pages = [];
 
       for (
-        let start = 0;
-        start <
-        repeatedImages.length;
-        start +=
-          activeGrid.slotsPerPage
+        const pageImages of pageGroups
       ) {
-        const pageImages =
-          repeatedImages.slice(
-            start,
-            start +
-              activeGrid.slotsPerPage
-          );
-
         const page =
           await generateSingleA4(
             pageImages,
@@ -3376,6 +3582,12 @@ function App() {
   /*
   ========================================================
   GET A4 PAGE IMAGES
+
+  Uses the same `buildPageGroups` grouping as the actual PDF
+  generation, so the overlay's rotate/remove icons always
+  line up with the correct photo on the correct page — even
+  when manual page breaks mean a page doesn't hold a full
+  `slotsPerPage` set of photos.
   ========================================================
   */
 
@@ -3384,13 +3596,12 @@ function App() {
       const repeatedImages =
         getImagesWithCopies();
 
-      return repeatedImages.slice(
-        pageIndex *
-          grid.slotsPerPage,
-
-        (pageIndex + 1) *
-          grid.slotsPerPage
+      const groups = buildPageGroups(
+        repeatedImages,
+        grid
       );
+
+      return groups[pageIndex] || [];
     };
 
   /*
@@ -4249,6 +4460,8 @@ function App() {
                   Click a photo to crop and adjust it. Drag a
                   photo — or use the ‹ › buttons — to reorder
                   it. Rotate photos from the A4 preview below.
+                  Use "Set page break" to force a photo to
+                  start a brand-new sheet.
                 </p>
               </div>
 
@@ -4329,123 +4542,252 @@ function App() {
                       draggedIndex !== index;
 
                     return (
-                      <div
-                        key={
-                          image.id
-                        }
-                        className={`thumb ${
-                          isSelected
-                            ? "selected"
-                            : ""
-                        } ${
-                          isDraggedThumb
-                            ? "dragging"
-                            : ""
-                        } ${
-                          isDragOverThumb
-                            ? "drag-over"
-                            : ""
-                        }`}
-                        draggable
-                        onDragStart={handleThumbDragStart(
-                          index
-                        )}
-                        onDragOver={handleThumbDragOver(
-                          index
-                        )}
-                        onDragLeave={handleThumbDragLeave(
-                          index
-                        )}
-                        onDrop={handleThumbDrop(
-                          index
-                        )}
-                        onDragEnd={
-                          handleThumbDragEnd
-                        }
-                        onClick={() =>
-                          selectImage(
-                            index
-                          )
-                        }
-                      >
+                      <>
 
-                        <div className="thumb-image">
+                        {index > 0 &&
+                          image.pageBreakBefore &&
+                          (() => {
+                            let pageStartIndex = 0;
 
-                          <img
-                            src={
-                              image.processedUrl ||
-                              image.url
+                            for (
+                              let previousIndex = index - 1;
+                              previousIndex >= 0;
+                              previousIndex--
+                            ) {
+                              if (
+                                images[previousIndex]
+                                  ?.pageBreakBefore
+                              ) {
+                                pageStartIndex =
+                                  previousIndex;
+                                break;
+                              }
                             }
-                            alt={
-                              image.name
-                            }
-                          />
 
-                        </div>
+                            const photosOnPreviousPage =
+                              index - pageStartIndex;
 
-                        <div className="thumb-number">
-                          {index + 1}
-                        </div>
+                            const hasPreviousPageSpace =
+                              photosOnPreviousPage <
+                              grid.slotsPerPage;
 
-                        <div className="thumb-reorder">
+                            return (
+                              <>
+                                {hasPreviousPageSpace && (
+                                  <label
+                                    key={`${image.id}-previous-page-add`}
+                                    className="thumb add-thumb"
+                                    title="Add photos to the previous sheet"
+                                  >
+                                    <input
+                                      type="file"
+                                      multiple
+                                      accept="image/*"
+                                      onChange={handleInsertIntoPreviousPage(
+                                        index
+                                      )}
+                                    />
 
-                          <button
-                            type="button"
-                            className="thumb-move-btn"
-                            title="Move earlier"
-                            disabled={index === 0}
-                            onClick={(event) => {
-                              event.stopPropagation();
+                                    <span className="add-thumb-icon">
+                                      ＋
+                                    </span>
 
-                              moveImage(
-                                index,
-                                index - 1
-                              );
-                            }}
-                          >
-                            ‹
-                          </button>
+                                    <span className="add-thumb-label">
+                                      Add more
+                                    </span>
+                                  </label>
+                                )}
 
-                          <button
-                            type="button"
-                            className="thumb-move-btn"
-                            title="Move later"
-                            disabled={
-                              index ===
-                              images.length - 1
-                            }
-                            onClick={(event) => {
-                              event.stopPropagation();
-
-                              moveImage(
-                                index,
-                                index + 1
-                              );
-                            }}
-                          >
-                            ›
-                          </button>
-
-                        </div>
-
-                        <button
-                          className="thumb-remove"
-                          type="button"
-                          title="Remove"
-                          onClick={(
-                            event
-                          ) => {
-                            event.stopPropagation();
-
-                            removeImage(
-                              index
+                                <div
+                                  key={`${image.id}-break-label`}
+                                  style={{
+                                    gridColumn: "1 / -1",
+                                    borderTop:
+                                      "2px dashed #f97316",
+                                    margin: "10px 0 2px",
+                                    position: "relative",
+                                    height: 1,
+                                  }}
+                                >
+                                  <span
+                                    style={{
+                                      position: "absolute",
+                                      top: -9,
+                                      left: 6,
+                                      background: "#fff",
+                                      fontSize: 10,
+                                      fontWeight: 600,
+                                      color: "#f97316",
+                                      padding: "0 4px",
+                                      whiteSpace: "nowrap",
+                                    }}
+                                  >
+                                    ✂ new sheet starts here
+                                  </span>
+                                </div>
+                              </>
                             );
-                          }}
-                        >
-                          ×
-                        </button>
+                          })()}
 
-                      </div>
+                        <div
+                          key={
+                            image.id
+                          }
+                          className={`thumb ${
+                            isSelected
+                              ? "selected"
+                              : ""
+                          } ${
+                            isDraggedThumb
+                              ? "dragging"
+                              : ""
+                          } ${
+                            isDragOverThumb
+                              ? "drag-over"
+                              : ""
+                          }`}
+                          draggable
+                          onDragStart={handleThumbDragStart(
+                            index
+                          )}
+                          onDragOver={handleThumbDragOver(
+                            index
+                          )}
+                          onDragLeave={handleThumbDragLeave(
+                            index
+                          )}
+                          onDrop={handleThumbDrop(
+                            index
+                          )}
+                          onDragEnd={
+                            handleThumbDragEnd
+                          }
+                          onClick={() =>
+                            selectImage(
+                              index
+                            )
+                          }
+                        >
+
+                          <div className="thumb-image">
+
+                            <img
+                              src={
+                                image.processedUrl ||
+                                image.url
+                              }
+                              alt={
+                                image.name
+                              }
+                            />
+
+                          </div>
+
+                          <div className="thumb-number">
+                            {index + 1}
+                          </div>
+
+                          <div className="thumb-reorder">
+
+                            <button
+                              type="button"
+                              className="thumb-move-btn"
+                              title="Move earlier"
+                              disabled={index === 0}
+                              onClick={(event) => {
+                                event.stopPropagation();
+
+                                moveImage(
+                                  index,
+                                  index - 1
+                                );
+                              }}
+                            >
+                              ‹
+                            </button>
+
+                            <button
+                              type="button"
+                              className="thumb-move-btn"
+                              title="Move later"
+                              disabled={
+                                index ===
+                                images.length - 1
+                              }
+                              onClick={(event) => {
+                                event.stopPropagation();
+
+                                moveImage(
+                                  index,
+                                  index + 1
+                                );
+                              }}
+                            >
+                              ›
+                            </button>
+
+                          </div>
+
+                          <button
+                            type="button"
+                            className={`thumb-page-break-btn ${
+                              image.pageBreakBefore
+                                ? "active"
+                                : ""
+                            }`}
+                            title={
+                              image.pageBreakBefore
+                                ? "Remove page break (currently starts a new sheet here)"
+                                : "Start a new sheet before this photo"
+                            }
+                            onClick={(event) => {
+                              event.stopPropagation();
+
+                              togglePageBreak(index);
+                            }}
+                            style={{
+                              position: "absolute",
+                              left: 4,
+                              bottom: 4,
+                              fontSize: 10,
+                              lineHeight: 1,
+                              padding: "3px 6px",
+                              borderRadius: 4,
+                              border: "1px solid #f97316",
+                              background: image.pageBreakBefore
+                                ? "#f97316"
+                                : "#fff",
+                              color: image.pageBreakBefore
+                                ? "#fff"
+                                : "#f97316",
+                              cursor: "pointer",
+                            }}
+                          >
+                            {image.pageBreakBefore
+                              ? "✂ Break set"
+                              : "Set break"}
+                          </button>
+
+                          <button
+                            className="thumb-remove"
+                            type="button"
+                            title="Remove"
+                            onClick={(
+                              event
+                            ) => {
+                              event.stopPropagation();
+
+                              removeImage(
+                                index
+                              );
+                            }}
+                          >
+                            ×
+                          </button>
+
+                        </div>
+
+                      </>
                     );
                   }
                 )}
@@ -4521,7 +4863,7 @@ function App() {
 
                 </div>
 
-                {a4Pages.length > 1 && (
+                {a4Pages.length > 0 && (
                   <div className="a4-pager">
 
                     <button
@@ -4566,6 +4908,24 @@ function App() {
                       }
                     >
                       Next ›
+                    </button>
+
+                    <button
+                      type="button"
+                      className="download a4-pager-download"
+                      onClick={generatePDF}
+                      disabled={
+                        images.length === 0 ||
+                        isDownloading
+                      }
+                      style={{
+                        marginLeft: "auto",
+                        whiteSpace: "nowrap",
+                      }}
+                    >
+                      {isDownloading
+                        ? "Preparing PDF…"
+                        : "Generate & Download"}
                     </button>
 
                   </div>
