@@ -1432,6 +1432,90 @@ button {
   margin-top: 0;
 }
 
+.print-effect-grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 8px;
+}
+
+.print-effect-card {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+  padding: 8px;
+  text-align: left;
+  color: var(--ink);
+  background: var(--card);
+  border: 1px solid var(--line);
+  border-radius: var(--radius-s);
+  cursor: pointer;
+  transition: border-color 0.15s ease, background 0.15s ease,
+    transform 0.15s ease;
+}
+
+.print-effect-card:hover {
+  border-color: var(--red);
+  transform: translateY(-1px);
+}
+
+.print-effect-card.active {
+  border-color: var(--red);
+  background: var(--red-wash);
+  box-shadow: 0 0 0 1px var(--red) inset;
+}
+
+.print-effect-swatch {
+  display: grid;
+  place-items: center;
+  width: 34px;
+  height: 34px;
+  flex-shrink: 0;
+  border-radius: 5px;
+  color: #fff;
+  background: #211f1c;
+  font-family: var(--font-mono);
+  font-size: 10px;
+  font-weight: 600;
+}
+
+.print-effect-none .print-effect-swatch {
+  color: var(--ink);
+  background: var(--paper-deep);
+}
+
+.print-effect-whitePaper .print-effect-swatch {
+  color: #211f1c;
+  background: #fff;
+  border: 1px solid var(--line);
+}
+
+.print-effect-xerox .print-effect-swatch {
+  background: linear-gradient(135deg, #fff 0 35%, #211f1c 36% 65%, #fff 66%);
+  color: #211f1c;
+  border: 1px solid var(--line);
+}
+
+.print-effect-copy {
+  display: flex;
+  min-width: 0;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.print-effect-copy strong {
+  overflow: hidden;
+  font-size: 11px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.print-effect-copy small {
+  color: var(--ink-soft);
+  font-size: 9px;
+  line-height: 1.25;
+}
+
 .inline-rotate-controls {
   display: flex;
   align-items: center;
