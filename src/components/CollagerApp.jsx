@@ -38,6 +38,7 @@ const PRINT_EFFECTS = {
     label: "Original",
     brightness: 100,
     contrast: 100,
+    saturation: 100,
     grayscale: false,
     description: "Keep the original photo colors",
   },
@@ -45,6 +46,7 @@ const PRINT_EFFECTS = {
     label: "Clean B&W",
     brightness: 100,
     contrast: 125,
+    saturation: 100,
     grayscale: true,
     description: "Crisp grayscale with balanced detail",
   },
@@ -52,6 +54,7 @@ const PRINT_EFFECTS = {
     label: "White Paper",
     brightness: 108,
     contrast: 150,
+    saturation: 100,
     grayscale: true,
     description: "Bright paper background for clean copies",
   },
@@ -59,8 +62,17 @@ const PRINT_EFFECTS = {
     label: "Xerox",
     brightness: 105,
     contrast: 220,
+    saturation: 100,
     grayscale: true,
     description: "High-contrast photocopy style",
+  },
+  magicColor: {
+    label: "Magic Color",
+    brightness: 105,
+    contrast: 112,
+    saturation: 135,
+    grayscale: false,
+    description: "Bright, vivid color for standout prints",
   },
 };
 
@@ -534,6 +546,9 @@ function App() {
   const [contrast, setContrast] =
     useState(100);
 
+  const [saturation, setSaturation] =
+    useState(100);
+
   const [zoom, setZoom] =
     useState(1);
 
@@ -812,6 +827,8 @@ function App() {
 
       contrast: 100,
 
+      saturation: 100,
+
       zoom: 1,
 
       grayscale: false,
@@ -943,6 +960,7 @@ function App() {
         frameRotation: 0,
         brightness: 100,
         contrast: 100,
+        saturation: 100,
         zoom: 1,
         grayscale: false,
         printEffect: "none",
@@ -1115,9 +1133,10 @@ function App() {
   const buildFilterString = (
     imageBrightness = 100,
     imageContrast = 100,
-    imageGrayscale = false
+    imageGrayscale = false,
+    imageSaturation = PRINT_EFFECTS[printEffect]?.saturation ?? 100
   ) =>
-    `brightness(${imageBrightness}%) contrast(${imageContrast}%)${
+    `brightness(${imageBrightness}%) contrast(${imageContrast}%) saturate(${imageSaturation}%)${
       imageGrayscale ? " grayscale(100%)" : ""
     }`;
 
@@ -1126,6 +1145,7 @@ function App() {
     setPrintEffect(effectName);
     setBrightness(effect.brightness);
     setContrast(effect.contrast);
+    setSaturation(effect.saturation);
     setGrayscale(effect.grayscale);
   };
 
@@ -1971,6 +1991,10 @@ function App() {
       image.contrast ?? 100
     );
 
+    setSaturation(
+      image.saturation ?? 100
+    );
+
     setZoom(
       image.zoom ?? 1
     );
@@ -2333,13 +2357,17 @@ function App() {
         ? images[selectedIndex]
         : null;
 
+    // Keep an unsaved editor selection when the image is rotated.
+    // The crop percentages remain valid because the rotated image is
+    // rendered as the new editor source.
     const existingCrop =
-      currentImage &&
+      crop ||
+      (currentImage &&
       currentImage.crop &&
       (currentImage.cropRotation ?? 0) ===
         (currentImage.rotation || 0)
         ? currentImage.crop
-        : null;
+        : null);
 
     if (existingCrop) {
       setCrop(existingCrop);
@@ -2842,7 +2870,8 @@ function App() {
     ctx.filter = buildFilterString(
       image.brightness ?? 100,
       image.contrast ?? 100,
-      image.grayscale ?? false
+      image.grayscale ?? false,
+      image.saturation ?? 100
     );
 
     ctx.drawImage(source, 0, 0);
@@ -2940,11 +2969,15 @@ function App() {
         360
     );
 
-    // Points were traced against the previous orientation —
-    // they'd land on the wrong part of the image now.
-    setPolygonPoints([]);
-    setIsPolygonClosed(false);
-    setStretchToRectangle(false);
+    // Keep a free-form selection aligned with the image after a
+    // clockwise quarter-turn. Percent coordinates transform as
+    // (x, y) -> (100 - y, x).
+    setPolygonPoints((previous) =>
+      previous.map((point) => ({
+        xPct: 100 - point.yPct,
+        yPct: point.xPct,
+      }))
+    );
   };
 
   /*
@@ -2976,6 +3009,7 @@ function App() {
     setBrightness(100);
 
     setContrast(100);
+    setSaturation(100);
 
     setZoom(1);
 
@@ -3097,6 +3131,8 @@ function App() {
                 brightness,
 
                 contrast,
+
+                saturation,
 
                 zoom,
 
