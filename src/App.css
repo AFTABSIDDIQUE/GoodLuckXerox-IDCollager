@@ -1496,6 +1496,11 @@ button {
   border: 1px solid var(--line);
 }
 
+.print-effect-magicColor .print-effect-swatch {
+  color: #fff;
+  background: linear-gradient(135deg, #e44d26, #2f80ed 52%, #27ae60);
+}
+
 .print-effect-copy {
   display: flex;
   min-width: 0;
