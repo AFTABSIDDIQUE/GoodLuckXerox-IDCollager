@@ -1430,9 +1430,15 @@ function App() {
     pointsPct,
     imageBrightness = 100,
     imageContrast = 100,
-    imageGrayscale = false
+    imageGrayscale = false,
+    imageZoom = 1
   ) => {
-    const sourcePoints = pointsPct.map(
+    const zoomedPoints = zoomPolygonPoints(
+      pointsPct,
+      imageZoom
+    );
+
+    const sourcePoints = zoomedPoints.map(
       (point) => ({
         x: (point.xPct / 100) * source.width,
         y: (point.yPct / 100) * source.height,
@@ -1730,7 +1736,8 @@ function App() {
     pointsPct,
     imageBrightness = 100,
     imageContrast = 100,
-    imageGrayscale = false
+    imageGrayscale = false,
+    imageZoom = 1
   ) => {
     if (
       pointsPct.length !==
@@ -1739,7 +1746,12 @@ function App() {
       return null;
     }
 
-    const rawSourcePoints = pointsPct.map(
+    const zoomedPoints = zoomPolygonPoints(
+      pointsPct,
+      imageZoom
+    );
+
+    const rawSourcePoints = zoomedPoints.map(
       (point) => ({
         x: (point.xPct / 100) * source.width,
         y: (point.yPct / 100) * source.height,
@@ -1829,6 +1841,37 @@ function App() {
     outputCtx.putImageData(outputImageData, 0, 0);
 
     return outputCanvas;
+  };
+
+  const zoomPolygonPoints = (points, imageZoom = 1) => {
+    if (imageZoom <= 1 || points.length === 0) {
+      return points;
+    }
+
+    const center = points.reduce(
+      (sum, point) => ({
+        xPct: sum.xPct + point.xPct / points.length,
+        yPct: sum.yPct + point.yPct / points.length,
+      }),
+      { xPct: 0, yPct: 0 }
+    );
+
+    return points.map((point) => ({
+      xPct: Math.min(
+        100,
+        Math.max(
+          0,
+          center.xPct + (point.xPct - center.xPct) / imageZoom
+        )
+      ),
+      yPct: Math.min(
+        100,
+        Math.max(
+          0,
+          center.yPct + (point.yPct - center.yPct) / imageZoom
+        )
+      ),
+    }));
   };
 
   /*
@@ -2456,7 +2499,8 @@ function App() {
             polygonPoints,
             brightness,
             contrast,
-            grayscale
+            grayscale,
+            zoom
           );
 
         if (stretched) {
@@ -2476,7 +2520,8 @@ function App() {
           polygonPoints,
           brightness,
           contrast,
-          grayscale
+          grayscale,
+          zoom
         );
 
       // Brightness/contrast/grayscale are already baked
@@ -2575,7 +2620,8 @@ function App() {
         grid.photoHeightPx,
         brightness,
         contrast,
-        grayscale
+        grayscale,
+        zoom
       );
     }
 
@@ -2587,7 +2633,8 @@ function App() {
       grid.photoHeightPx,
       brightness,
       contrast,
-      grayscale
+      grayscale,
+      zoom
     );
   };
 
@@ -2636,7 +2683,8 @@ function App() {
             polygonPoints,
             brightness,
             contrast,
-            grayscale
+            grayscale,
+            zoom
           );
 
         if (stretched) {
@@ -2652,7 +2700,8 @@ function App() {
           polygonPoints,
           brightness,
           contrast,
-          grayscale
+          grayscale,
+          zoom
         );
 
       return clipped.toDataURL(
