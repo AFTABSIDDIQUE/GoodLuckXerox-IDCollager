@@ -1215,7 +1215,7 @@ button {
   top: 6px;
   right: 6px;
   display: flex;
-  gap: 4px;
+  gap: 3px;
   opacity: 0;
   transition: opacity 0.15s ease;
 }
@@ -1224,10 +1224,10 @@ button {
   opacity: 1;
 }
 
-.a4-cell-toolbar button {
-  width: 24px;
-  height: 24px;
-  border-radius: 6px;
+.a4-cell-btn {
+  width: 22px;
+  height: 22px;
+  border-radius: 5px;
   border: 1px solid var(--line);
   background: rgba(255, 253, 248, 0.95);
   color: var(--ink);
@@ -1237,17 +1237,34 @@ button {
   align-items: center;
   justify-content: center;
   box-shadow: 0 2px 6px rgba(33, 31, 28, 0.15);
-  transition: background 0.15s ease, color 0.15s ease;
+  transition: background 0.15s ease, color 0.15s ease, border-color 0.15s ease;
 }
 
-.a4-cell-toolbar button:hover {
+.a4-cell-btn:hover {
   background: var(--red);
   color: #fff;
   border-color: var(--red);
 }
 
+.a4-cell-btn.a4-cell-active {
+  background: var(--ink);
+  color: #fff;
+  border-color: var(--ink);
+}
+
+.a4-cell-btn.a4-cell-active:hover {
+  background: var(--red);
+  border-color: var(--red);
+}
+
 .a4-cell-remove {
   color: var(--red-deep) !important;
+}
+
+.a4-cell-btn.a4-cell-remove:hover {
+  background: var(--red-deep) !important;
+  border-color: var(--red-deep) !important;
+  color: #fff !important;
 }
 
 .a4-cell-number {
@@ -1271,6 +1288,13 @@ button {
 
 .a4-cell:hover .a4-cell-number {
   opacity: 1;
+}
+
+/* Visual indicator when cell box orientation is rotated */
+.a4-cell-rotated {
+  outline: 2px dashed rgba(217, 119, 6, 0.6);
+  outline-offset: -2px;
+  border-radius: 2px;
 }
 
 .preview-generating {
@@ -1851,4 +1875,110 @@ that appears above the image on hover, driven by the
   height: 28px;
   border-radius: 5px;
   white-space: nowrap;
+}
+
+/* =========================================================
+   TRANSFORM TOOLBAR (editor panel — Rotate + Flip)
+========================================================= */
+
+.transform-toolbar {
+  display: flex;
+  align-items: stretch;
+  gap: 0;
+  background: var(--card);
+  border: 1.5px solid var(--line);
+  border-radius: var(--radius-m);
+  overflow: hidden;
+  box-shadow: 0 1px 4px rgba(33, 31, 28, 0.07);
+}
+
+.transform-group {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 8px;
+  padding: 10px 8px 8px;
+}
+
+.transform-group-label {
+  font-family: var(--font-mono);
+  font-size: 10px;
+  font-weight: 500;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  color: var(--ink-soft);
+  align-self: flex-start;
+}
+
+.transform-btn-row {
+  display: flex;
+  gap: 6px;
+}
+
+.transform-btn {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 4px;
+  width: 52px;
+  height: 52px;
+  border-radius: var(--radius-s);
+  border: 1.5px solid var(--line);
+  background: var(--paper);
+  color: var(--ink);
+  cursor: pointer;
+  transition: background 0.15s ease, color 0.15s ease,
+              border-color 0.15s ease, transform 0.1s ease,
+              box-shadow 0.15s ease;
+  font-family: var(--font-mono);
+  font-size: 10px;
+  font-weight: 500;
+  letter-spacing: 0.03em;
+}
+
+.transform-btn:hover {
+  background: var(--ink);
+  color: var(--paper);
+  border-color: var(--ink);
+  transform: translateY(-1px);
+  box-shadow: 0 4px 12px rgba(33, 31, 28, 0.2);
+}
+
+.transform-btn:hover svg {
+  stroke: var(--paper);
+}
+
+.transform-btn.active {
+  background: var(--red);
+  color: #fff;
+  border-color: var(--red);
+  box-shadow: 0 3px 10px rgba(193, 64, 31, 0.35);
+}
+
+.transform-btn.active:hover {
+  background: var(--red-deep);
+  border-color: var(--red-deep);
+  transform: translateY(-1px);
+}
+
+.transform-btn.active svg {
+  stroke: #fff;
+}
+
+.transform-value {
+  font-family: var(--font-mono);
+  font-size: 11px;
+  font-weight: 500;
+  color: var(--ink-soft);
+  letter-spacing: 0.04em;
+  min-height: 16px;
+}
+
+.transform-divider {
+  width: 1px;
+  background: var(--line);
+  align-self: stretch;
+  flex-shrink: 0;
 }
